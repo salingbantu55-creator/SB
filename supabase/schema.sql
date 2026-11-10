@@ -19,7 +19,27 @@
 --   5. Data finansial publik hanya lewat view ft_public (tanpa PII donatur).
 -- ============================================================
 
-create extension if not exists "pgcrypto";
+-- pgcrypto opsional: PG13+ memiliki gen_random_uuid() bawaan.
+do $$ begin
+  create extension if not exists "pgcrypto";
+exception when others then
+  raise notice 'Ekstensi pgcrypto tidak tersedia — memakai gen_random_uuid() bawaan PostgreSQL 13+.';
+end $$;
+
+-- Peran bawaan Supabase — dibuat hanya bila belum ada (aman dijalankan ulang,
+-- dan membuat file ini kompatibel dengan PostgreSQL di luar Supabase).
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then
+    create role anon nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then
+    create role authenticated nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then
+    create role service_role nologin;
+  end if;
+end $$;
 
 -- ============================================================
 -- 1) PERAN & IZIN (RBAC — 8 peran + modul Outbox Tahap 2)
@@ -506,6 +526,7 @@ begin
 
   select * into r from receipts where donation_id = d.id limit 1;
   if not found then
+    perform pg_advisory_xact_lock(778801);  -- serialisasi penerbitan nomor kuitansi
     ym := to_char(now_ts, 'YYYYMM');
     select count(*) + 1 into nn from receipts where receipt_no like 'RCPT-' || ym || '-%';
     insert into receipts (receipt_no, donation_id, trx_code, amount, fund_type, program_name, donor_name, method, issued_at)
@@ -609,6 +630,7 @@ begin
 
   select * into r from receipts where donation_id = d.id limit 1;
   if not found then
+    perform pg_advisory_xact_lock(778801);  -- serialisasi penerbitan nomor kuitansi
     ym := to_char(now_ts, 'YYYYMM');
     select count(*) + 1 into nn from receipts where receipt_no like 'RCPT-' || ym || '-%';
     insert into receipts (receipt_no, donation_id, trx_code, amount, fund_type, program_name, donor_name, method, issued_at)
@@ -641,6 +663,12 @@ grant execute on function demo_finalize_payment(text) to anon, authenticated;
 grant execute on function cancel_donation_public(text) to anon, authenticated;
 grant execute on function expire_stale_payments() to anon, authenticated;
 grant execute on function increment_news_views(uuid) to anon, authenticated;
+
+-- RED LINE: finalisasi webhook HANYA dari server (Edge Function payment-webhook
+-- dengan service_role, setelah signature provider diverifikasi).
+-- Tanpa revoke ini, PostgreSQL secara bawaan memberi EXECUTE ke PUBLIC.
+revoke execute on function webhook_finalize_payment(text, text, text, boolean) from public;
+grant execute on function webhook_finalize_payment(text, text, text, boolean) to service_role;
 
 -- ============================================================
 -- ROW LEVEL SECURITY
@@ -900,7 +928,7 @@ on conflict (key) do update set
   name = excluded.name, description = excluded.description, permissions = excluded.permissions;
 
 insert into permissions (code, module, action)
-select m.module || '.' || a.action, m.module, a.action
+select m.module || '.' || m.action, m.module, m.action
 from (values
   ('dashboard','view'),
   ('programs','view'),('programs','manage'),
@@ -961,6 +989,11 @@ insert into financial_accounts (acc_code, name, type, bank_name, number) values
   ('KAS-01','Kas Kecil','cash','','-')
 on conflict (acc_code) do nothing;
 
+-- Cegah duplikasi seed bila file dijalankan ulang:
+delete from faqs f
+ where exists (select 1 from faqs g where g.question = f.question and g.id < f.id);
+create unique index if not exists ux_faqs_question on faqs (question);
+
 insert into faqs (question, answer, order_no) values
   ('Bagaimana cara berdonasi melalui website ini?','Pilih program atau buka halaman Donasi, tentukan jumlah dan jenis dana (zakat/infak/sedekah/wakaf), isi data diri (atau pilih donasi anonim), lalu selesaikan pembayaran melalui Virtual Account, QRIS, atau e-wallet. Kuitansi otomatis terbit setelah pembayaran terverifikasi.',1),
   ('Apakah pembayaran saya aman?','Ya. Seluruh transaksi diproses melalui payment gateway resmi dan status pembayaran hanya diperbarui setelah konfirmasi webhook terverifikasi dari penyedia pembayaran — bukan sekadar halaman konfirmasi.',2),
@@ -968,7 +1001,7 @@ insert into faqs (question, answer, order_no) values
   ('Apakah donasi saya bisa dibatalkan?','Donasi yang masih menunggu pembayaran dapat dibatalkan sendiri melalui halaman instruksi pembayaran. Dana yang telah berhasil dikumpulkan dan disalurkan tidak dapat dikembalikan.',4),
   ('Bagaimana saya bisa memantau penggunaan dana?','Halaman Transparansi memuat saldo per jenis dana, seluruh penyaluran, dan laporan keuangan berkala yang telah disahkan — dihitung langsung dari transaksi terverifikasi.',5),
   ('Bagaimana cara menghubungi pengelola?','Gunakan tombol WhatsApp mengapung di seluruh halaman, atau kirim pesan melalui nomor resmi lembaga pada halaman Profil.',6)
-on conflict do nothing;
+on conflict (question) do nothing;
 
 -- ============================================================
 -- STORAGE: bucket "uploads" (gambar program/berita/galeri/bukti)

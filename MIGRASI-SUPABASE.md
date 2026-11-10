@@ -2,6 +2,15 @@
 
 Panduan lengkap memindahkan aplikasi dari **MODE DEMO (localStorage)** ke **Supabase asli (PostgreSQL + Auth + Edge Functions + Storage)**. Ikuti langkah berurutan; seluruh langkah dapat diselesaikan ±30 menit.
 
+> **Catatan revisi v2.1 (11 Nov 2026):** `supabase/schema.sql` diperbarui setelah uji end-to-end pada PostgreSQL asli:
+> 1. **Perbaikan error `42P01: missing FROM-clause entry for table "a"`** pada seed `permissions` (baris ~903) — alias `a.action` dikoreksi menjadi `m.action`.
+> 2. Idempoten penuh: seed FAQ kini aman dijalankan ulang (dedup + indeks unik `ux_faqs_question`), tanpa duplikasi data.
+> 3. Penguatan red line: `webhook_finalize_payment` di-`REVOKE` dari `PUBLIC`/anon/authenticated — hanya `service_role` (Edge Function) yang boleh mengeksekusi.
+> 4. Nomor kuitansi dilindungi `pg_advisory_xact_lock` (aman dari balapan transaksi serentak).
+> 5. Peran bawaan Supabase (anon/authenticated/service_role) dibuat otomatis bila belum ada — file tetap jalan di luar Supabase.
+>
+> **Jika Anda pernah menjalankan skema versi lama yang gagal di baris 903:** jalankan ulang **seluruh** `schema.sql` versi baru. Semua pernyataannya bersifat `if not exists`/`on conflict` sehingga aman untuk data yang sudah ada.
+
 ---
 
 ## Ringkasan Arsitektur
